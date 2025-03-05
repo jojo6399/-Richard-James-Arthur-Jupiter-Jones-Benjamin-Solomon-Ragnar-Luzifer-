@@ -21,11 +21,11 @@ import {
   render,
   cleanup,
   screen,
+  userEvent,
   within,
   waitFor,
 } from 'spec/helpers/testing-library';
 import { stateWithoutNativeFilters } from 'spec/fixtures/mockStore';
-import userEvent from '@testing-library/user-event';
 import { DynamicPluginProvider } from 'src/components/DynamicPlugins';
 import { testWithId } from 'src/utils/testUtils';
 import {
@@ -165,14 +165,14 @@ describe('VizTypeControl', () => {
   it('Render viz tiles when non-featured is rendered', async () => {
     const props = {
       ...defaultProps,
-      value: 'line',
+      value: VizType.Sankey,
       isModalOpenInit: false,
     };
     const state = {
       charts: {
         1: {
           latestQueryFormData: {
-            viz_type: VizType.LegacyLine,
+            viz_type: VizType.Sankey,
           },
         },
       },

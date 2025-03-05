@@ -545,7 +545,7 @@ class PrestoBaseEngineSpec(BaseEngineSpec, metaclass=ABCMeta):
             column.get("column_name"): column.get("type") for column in columns or []
         }
 
-        for col_name, value in zip(col_names, values):
+        for col_name, value in zip(col_names, values, strict=False):
             col_type = column_type_by_name.get(col_name)
 
             if isinstance(col_type, str):
@@ -664,7 +664,7 @@ class PrestoBaseEngineSpec(BaseEngineSpec, metaclass=ABCMeta):
         if len(kwargs.keys()) != len(part_fields) - 1:
             # pylint: disable=consider-using-f-string
             msg = (
-                "A filter needs to be specified for {} out of the " "{} fields."
+                "A filter needs to be specified for {} out of the {} fields."
             ).format(len(part_fields) - 1, len(part_fields))
             raise SupersetTemplateException(msg)
 
@@ -1240,7 +1240,7 @@ class PrestoEngineSpec(PrestoBaseEngineSpec):
                     if isinstance(values, str):
                         values = cast(Optional[list[Any]], destringify(values))
                         row[name] = values
-                    for value, col in zip(values or [], expanded):
+                    for value, col in zip(values or [], expanded, strict=False):
                         row[col["column_name"]] = value
 
         data = [
@@ -1271,7 +1271,7 @@ class PrestoEngineSpec(PrestoBaseEngineSpec):
 
             metadata["partitions"] = {
                 "cols": sorted(indexes[0].get("column_names", [])),
-                "latest": dict(zip(col_names, latest_parts)),
+                "latest": dict(zip(col_names, latest_parts, strict=False)),
                 "partitionQuery": cls._partition_query(
                     table=table,
                     indexes=indexes,

@@ -62,9 +62,7 @@ except ImportError:
 class CustomTrinoAuthErrorMeta(type):
     def __instancecheck__(cls, instance: object) -> bool:
         logger.info("is this being called?")
-        return isinstance(
-            instance, HttpError
-        ) and "error 401: b'Invalid credentials'" in str(instance)
+        return isinstance(instance, HttpError) and "error 401" in str(instance)
 
 
 class TrinoAuthError(HttpError, metaclass=CustomTrinoAuthErrorMeta):
@@ -111,7 +109,7 @@ class TrinoEngineSpec(PrestoBaseEngineSpec):
                         }
                     )
                 ),
-                "latest": dict(zip(col_names, latest_parts)),
+                "latest": dict(zip(col_names, latest_parts, strict=False)),
                 "partitionQuery": cls._partition_query(
                     table=table,
                     indexes=indexes,

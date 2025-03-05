@@ -38,6 +38,7 @@ import sqlalchemy as sqla
 import sshtunnel
 from flask import g, request
 from flask_appbuilder import Model
+from marshmallow.exceptions import ValidationError
 from sqlalchemy import (
     Boolean,
     Column,
@@ -72,8 +73,9 @@ from superset.extensions import (
     security_manager,
     ssh_manager_factory,
 )
-from superset.models.helpers import AuditMixinNullable, ImportExportMixin
+from superset.models.helpers import AuditMixinNullable, ImportExportMixin, UUIDMixin
 from superset.result_set import SupersetResultSet
+from superset.sql.parse import SQLScript
 from superset.sql_parse import Table
 from superset.superset_typing import (
     DbapiDescription,
@@ -82,8 +84,12 @@ from superset.superset_typing import (
 )
 from superset.utils import cache as cache_util, core as utils, json
 from superset.utils.backports import StrEnum
-from superset.utils.core import DatasourceName, get_username
-from superset.utils.oauth2 import get_oauth2_access_token, OAuth2ClientConfigSchema
+from superset.utils.core import get_username
+from superset.utils.oauth2 import (
+    check_for_oauth2,
+    get_oauth2_access_token,
+    OAuth2ClientConfigSchema,
+)
 
 config = app.config
 custom_password_store = config["SQLALCHEMY_CUSTOM_PASSWORD_STORE"]
@@ -107,7 +113,7 @@ class KeyValue(Model):  # pylint: disable=too-few-public-methods
     value = Column(utils.MediumText(), nullable=False)
 
 
-class CssTemplate(Model, AuditMixinNullable):
+class CssTemplate(AuditMixinNullable, UUIDMixin, Model):
     """CSS templates for dashboards"""
 
     __tablename__ = "css_templates"
@@ -450,13 +456,14 @@ class Database(Model, AuditMixinNullable, ImportExportMixin):  # pylint: disable
 
             engine_context_manager = config["ENGINE_CONTEXT_MANAGER"]
             with engine_context_manager(self, catalog, schema):
-                yield self._get_sqla_engine(
-                    catalog=catalog,
-                    schema=schema,
-                    nullpool=nullpool,
-                    source=source,
-                    sqlalchemy_uri=sqlalchemy_uri,
-                )
+                with check_for_oauth2(self):
+                    yield self._get_sqla_engine(
+                        catalog=catalog,
+                        schema=schema,
+                        nullpool=nullpool,
+                        source=source,
+                        sqlalchemy_uri=sqlalchemy_uri,
+                    )
 
     def _get_sqla_engine(  # pylint: disable=too-many-locals  # noqa: C901
         self,
@@ -582,10 +589,9 @@ class Database(Model, AuditMixinNullable, ImportExportMixin):  # pylint: disable
             nullpool=nullpool,
             source=source,
         ) as engine:
-            try:
+            with check_for_oauth2(self):
                 with closing(engine.raw_connection()) as conn:
-                    # pre-session queries are used to set the selected schema and, in the  # noqa: E501
-                    # future, the selected catalog
+                    # pre-session queries are used to set the selected catalog/schema
                     for prequery in self.db_engine_spec.get_prequeries(
                         database=self,
                         catalog=catalog,
@@ -595,11 +601,6 @@ class Database(Model, AuditMixinNullable, ImportExportMixin):  # pylint: disable
                         cursor.execute(prequery)
 
                     yield conn
-
-            except Exception as ex:
-                if self.is_oauth2_enabled() and self.db_engine_spec.needs_oauth2(ex):
-                    self.db_engine_spec.start_oauth2_dance(self)
-                raise
 
     def get_default_catalog(self) -> str | None:
         """
@@ -740,6 +741,7 @@ class Database(Model, AuditMixinNullable, ImportExportMixin):  # pylint: disable
         qry: Select,
         catalog: str | None = None,
         schema: str | None = None,
+        is_virtual: bool = False,
     ) -> str:
         with self.get_sqla_engine(catalog=catalog, schema=schema) as engine:
             sql = str(qry.compile(engine, compile_kwargs={"literal_binds": True}))
@@ -747,6 +749,12 @@ class Database(Model, AuditMixinNullable, ImportExportMixin):  # pylint: disable
             # pylint: disable=protected-access
             if engine.dialect.identifier_preparer._double_percents:  # noqa
                 sql = sql.replace("%%", "%")
+
+        # for nwo we only optimize queries on virtual datasources, since the only
+        # optimization available is predicate pushdown
+        if is_feature_enabled("OPTIMIZE_SQL") and is_virtual:
+            script = SQLScript(sql, self.db_engine_spec.engine).optimize()
+            sql = script.format()
 
         return sql
 
@@ -783,14 +791,14 @@ class Database(Model, AuditMixinNullable, ImportExportMixin):  # pylint: disable
         return self.sqlalchemy_uri
 
     @cache_util.memoized_func(
-        key="db:{self.id}:schema:{schema}:table_list",
+        key="db:{self.id}:catalog:{catalog}:schema:{schema}:table_list",
         cache=cache_manager.cache,
     )
     def get_all_table_names_in_schema(
         self,
         catalog: str | None,
         schema: str,
-    ) -> set[DatasourceName]:
+    ) -> set[tuple[str, str, str | None]]:
         """Parameters need to be passed as keyword arguments.
 
         For unused parameters, they are referenced in
@@ -806,7 +814,7 @@ class Database(Model, AuditMixinNullable, ImportExportMixin):  # pylint: disable
         try:
             with self.get_inspector(catalog=catalog, schema=schema) as inspector:
                 return {
-                    DatasourceName(table, schema, catalog)
+                    (table, schema, catalog)
                     for table in self.db_engine_spec.get_table_names(
                         database=self,
                         inspector=inspector,
@@ -817,14 +825,14 @@ class Database(Model, AuditMixinNullable, ImportExportMixin):  # pylint: disable
             raise self.db_engine_spec.get_dbapi_mapped_exception(ex) from ex
 
     @cache_util.memoized_func(
-        key="db:{self.id}:schema:{schema}:view_list",
+        key="db:{self.id}:catalog:{catalog}:schema:{schema}:view_list",
         cache=cache_manager.cache,
     )
     def get_all_view_names_in_schema(
         self,
         catalog: str | None,
         schema: str,
-    ) -> set[DatasourceName]:
+    ) -> set[tuple[str, str, str | None]]:
         """Parameters need to be passed as keyword arguments.
 
         For unused parameters, they are referenced in
@@ -840,7 +848,7 @@ class Database(Model, AuditMixinNullable, ImportExportMixin):  # pylint: disable
         try:
             with self.get_inspector(catalog=catalog, schema=schema) as inspector:
                 return {
-                    DatasourceName(view, schema, catalog)
+                    (view, schema, catalog)
                     for view in self.db_engine_spec.get_view_names(
                         database=self,
                         inspector=inspector,
@@ -865,7 +873,7 @@ class Database(Model, AuditMixinNullable, ImportExportMixin):  # pylint: disable
             yield sqla.inspect(engine)
 
     @cache_util.memoized_func(
-        key="db:{self.id}:schema_list",
+        key="db:{self.id}:catalog:{catalog}:schema_list",
         cache=cache_manager.cache,
     )
     def get_all_schema_names(
@@ -1125,9 +1133,13 @@ class Database(Model, AuditMixinNullable, ImportExportMixin):  # pylint: disable
         admins to create custom OAuth2 clients from the Superset UI, and assign them to
         specific databases.
         """
-        encrypted_extra = json.loads(self.encrypted_extra or "{}")
-        oauth2_client_info = encrypted_extra.get("oauth2_client_info", {})
-        return bool(oauth2_client_info) or self.db_engine_spec.is_oauth2_enabled()
+        try:
+            client_config = self.get_oauth2_config()
+        except ValidationError:
+            logger.warning("Invalid OAuth2 client configuration for database %s", self)
+            client_config = None
+
+        return client_config is not None or self.db_engine_spec.is_oauth2_enabled()
 
     def get_oauth2_config(self) -> OAuth2ClientConfig | None:
         """
@@ -1227,7 +1239,7 @@ class FavStarClassName(StrEnum):
     DASHBOARD = "Dashboard"
 
 
-class FavStar(Model):  # pylint: disable=too-few-public-methods
+class FavStar(UUIDMixin, Model):
     __tablename__ = "favstar"
 
     id = Column(Integer, primary_key=True)

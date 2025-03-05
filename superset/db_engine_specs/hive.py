@@ -261,8 +261,9 @@ class HiveEngineSpec(PrestoEngineSpec):
         if isinstance(sqla_type, types.Date):
             return f"CAST('{dttm.date().isoformat()}' AS DATE)"
         if isinstance(sqla_type, types.TIMESTAMP):
-            return f"""CAST('{dttm
-                .isoformat(sep=" ", timespec="microseconds")}' AS TIMESTAMP)"""
+            return f"""CAST('{
+                dttm.isoformat(sep=" ", timespec="microseconds")
+            }' AS TIMESTAMP)"""
         return None
 
     @classmethod
@@ -440,7 +441,7 @@ class HiveEngineSpec(PrestoEngineSpec):
             # table is not partitioned
             return None
         if values is not None and columns is not None:
-            for col_name, value in zip(col_names, values):
+            for col_name, value in zip(col_names, values, strict=False):
                 for clm in columns:
                     if clm.get("name") == col_name:
                         query = query.where(Column(col_name) == value)
